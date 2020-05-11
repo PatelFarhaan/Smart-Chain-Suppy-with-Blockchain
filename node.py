@@ -1,17 +1,32 @@
-from flask import Flask, jsonify, request, send_from_directory
-from flask_cors import CORS
-
+import hashlib
 from wallet import Wallet
+from flask_cors import CORS
 from blockchain import Blockchain
+from flask_mongoengine import MongoEngine
+from flask import Flask, jsonify, request, send_from_directory
+from flask_marshmallow  import Marshmallow
+
+
 
 app = Flask(__name__)
 CORS(app)
+app.config['MONGODB_SETTINGS'] = {'host': "mongodb://localhost:27017/admin"}
+db = MongoEngine(app)
+ma = Marshmallow(app)
 
 
 @app.route('/', methods=['GET'])
 def get_node_ui():
-	print(request.remote_addr)
-	return send_from_directory('ui', 'node.html')
+    print(request.remote_addr)
+    return send_from_directory('ui', 'node.html')
+
+
+@app.route('/all-transactions', methods=['GET'])
+def get_transactions():
+    bk_obj = BlockChain.objects.all()
+    ma_schema = AllTransactions()
+    resp = ma_schema.dump(bk_obj, many=True)
+    return jsonify({"result": True, "data": resp})
 
 
 @app.route('/network', methods=['GET'])
@@ -183,9 +198,16 @@ def mine():
     if blockchain.resolve_conflicts:
         response = {'message': 'Resolve conflicts first, block not added!'}
         return jsonify(response), 409
+
+    create_keys()
     block = blockchain.mine_block()
+
     if block is not None:
         dict_block = block.__dict__.copy()
+
+        resp = request.get_json()
+        cargo_id =  resp["id"]
+
         dict_block['transactions'] = [
             tx.__dict__ for tx in dict_block['transactions']]
         response = {
@@ -193,7 +215,45 @@ def mine():
             'block': dict_block,
             'funds': blockchain.get_balance()
         }
+
+        bk_obj = BlockChain.objects.filter(cargo_id=cargo_id).first()
+
+        if bk_obj:
+            # get the list and append response in this list
+            blocks = list(bk_obj.blocks)
+            last_ele = blocks[-1]
+
+            index = last_ele["index"]
+            transactions = last_ele["transactions"][0]
+            signature = transactions["signature"]
+
+            response["block"]["index"] = index+1
+            del response["block"]["transactions"][0]["amount"]
+            response["block"]["transactions"][0]["sender"] = cargo_id
+            response["block"]["transactions"][0]["signature"] = signature
+
+
+            blocks.append(response["block"])
+            bk_obj.blocks = blocks
+            bk_obj.save()
+
+        else:
+            # create a new record in the blockchain
+            response["block"]["index"] = 0
+            response["block"]["previous_hash"] = ""
+            del response["block"]["transactions"][0]["amount"]
+            response["block"]["transactions"][0]["sender"] = cargo_id
+            response["block"]["transactions"][0]["signature"] = hashlib.sha3_256(cargo_id.encode('utf-8')).hexdigest()
+
+            new_dict = {
+                "cargo_id": cargo_id,
+                "blocks": [response["block"]]
+            }
+            new_bk_obj = BlockChain(**new_dict)
+            new_bk_obj.save()
+
         return jsonify(response), 201
+
     else:
         response = {
             'message': 'Adding a block failed.',
@@ -275,12 +335,19 @@ def get_nodes():
     return jsonify(response), 200
 
 
+##################################
+class BlockChain(db.Document):
+    cargo_id = db.StringField()
+    blocks = db.ListField()
+
+class AllTransactions(ma.Schema):
+    class Meta:
+        fields = ("cargo_id", "blocks")
+##################################
+
+
 if __name__ == '__main__':
-    from argparse import ArgumentParser
-    parser = ArgumentParser()
-    parser.add_argument('-p', '--port', type=int, default=5000)
-    args = parser.parse_args()
-    port = args.port
+    port = 80
     wallet = Wallet(port)
     blockchain = Blockchain(wallet.public_key, port)
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, use_reloader=True, debug=True)
