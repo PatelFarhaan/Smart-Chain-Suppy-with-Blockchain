@@ -2,10 +2,10 @@ import hashlib
 from wallet import Wallet
 from flask_cors import CORS
 from blockchain import Blockchain
+from flask_mail import Mail, Message
 from flask_mongoengine import MongoEngine
-from flask import Flask, jsonify, request, send_from_directory
 from flask_marshmallow  import Marshmallow
-
+from flask import Flask, jsonify, request, send_from_directory
 
 
 app = Flask(__name__)
@@ -13,6 +13,19 @@ CORS(app)
 app.config['MONGODB_SETTINGS'] = {'host': "mongodb://localhost:27017/admin"}
 db = MongoEngine(app)
 ma = Marshmallow(app)
+
+app.config.update(
+    DEBUG=True,
+    MAIL_SERVER='smtp.gmail.com',
+    MAIL_PORT=587,
+    MAIL_USE_TLS = True,
+    MAIL_USE_SSL = False,
+    MAIL_USERNAME = 'blockchain.cmpe281',
+    MAIL_PASSWORD = 'Qwerty@281',
+    MAIL_DEBUG = True
+)
+mail=Mail(app)
+
 
 
 @app.route('/', methods=['GET'])
@@ -215,30 +228,58 @@ def mine():
             'block': dict_block,
             'funds': blockchain.get_balance()
         }
-
         bk_obj = BlockChain.objects.filter(cargo_id=cargo_id).first()
 
         if bk_obj:
             # get the list and append response in this list
             blocks = list(bk_obj.blocks)
             last_ele = blocks[-1]
+            weight = blocks[0]["data"]["weight"]
+            signature = blocks[0]["transactions"][0]["signature"]
+            transactions = last_ele["transactions"][0]
+
+            data = {
+                "position": resp["position"],
+                "temperature": resp["temperature"],
+                "weight": resp["weight"]
+            }
+
+            if weight != resp["weight"] or signature != transactions["signature"]:
+                msg = Message("BLOCKCHAIN ALERT!!!", sender='blockchain.cmpe281', recipients=['patel.farhaaan@gmail.com'])
+                msg.body = f"""
+                Hi,
+                
+                This mail is just to inform you that your blockchain data has been tampered. 
+                Your actual values of "weight": {weight} and "signature": {signature}.
+                The passed values are of "weight": {resp["weight"]} and "signature": {transactions["signature"]}.
+                
+                
+                Thank and Regards,
+                Team Blockchain.
+
+                """
+                mail.send(msg)
+
 
             index = last_ele["index"]
-            transactions = last_ele["transactions"][0]
             signature = transactions["signature"]
-
+            response["block"]["data"] = data
             response["block"]["index"] = index+1
             del response["block"]["transactions"][0]["amount"]
             response["block"]["transactions"][0]["sender"] = cargo_id
             response["block"]["transactions"][0]["signature"] = signature
 
-
             blocks.append(response["block"])
             bk_obj.blocks = blocks
             bk_obj.save()
-
         else:
             # create a new record in the blockchain
+            data = {
+                "position": resp["position"],
+                "temperature": resp["temperature"],
+                "weight": resp["weight"]
+            }
+            response["block"]["data"] = data
             response["block"]["index"] = 0
             response["block"]["previous_hash"] = ""
             del response["block"]["transactions"][0]["amount"]
@@ -246,6 +287,7 @@ def mine():
             response["block"]["transactions"][0]["signature"] = hashlib.sha3_256(cargo_id.encode('utf-8')).hexdigest()
 
             new_dict = {
+                "email": resp["email"],
                 "cargo_id": cargo_id,
                 "blocks": [response["block"]]
             }
@@ -338,6 +380,7 @@ def get_nodes():
 ##################################
 class BlockChain(db.Document):
     cargo_id = db.StringField()
+    email = db.StringField()
     blocks = db.ListField()
 
 class AllTransactions(ma.Schema):
